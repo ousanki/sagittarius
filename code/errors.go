@@ -87,6 +87,6 @@ func BuildCode(code int, message string) code {
 	return c
 }
 
-func ErrorIs(code Error, err error) bool {
-	return code.Cause() == Cause(err)
+func ErrorIs(c code, err error) bool {
+	return Cause(c) == Cause(err)
 }
