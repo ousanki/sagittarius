@@ -15,7 +15,7 @@ type withMessage struct {
 	msg   string
 }
 
-func (w *withMessage) Error() string { return w.msg + ": " + w.cause.Error() }
+func (w *withMessage) Error() string { return w.msg + "| " + w.cause.Error() }
 
 func (w *withMessage) Cause() error  { return w.cause }
 
@@ -34,7 +34,7 @@ type Error struct {
 	Message string
 }
 
-func (e *Error) Error() string { return fmt.Sprintf("code:%d, message:%s", e.Code, e.Message) }
+func (e *Error) Error() string { return fmt.Sprintf("code:[%d],msg:[%s]", e.Code, e.Message) }
 
 func (e *Error) Cause() error { return fmt.Errorf("%d", e.Code) }
 
@@ -69,7 +69,7 @@ func NewCode(code int, message string) code {
 	defer _codeMu.Unlock()
 
 	if _, has := codes[code]; has {
-		panic("register code already exist error.")
+		panic("code already exist error.")
 	}
 	c := &Error{
 		Code:    code,
@@ -88,5 +88,5 @@ func BuildCode(code int, message string) code {
 }
 
 func ErrorIs(c code, err error) bool {
-	return Cause(c) == Cause(err)
+	return Cause(c).Error() == Cause(err).Error()
 }
