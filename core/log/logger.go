@@ -1,244 +1,286 @@
 package log
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	rotate "github.com/lestrrat-go/file-rotatelogs"
-	"github.com/opentracing/opentracing-go"
-	"github.com/uber/jaeger-client-go"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"runtime"
+	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
-var (
-	_filePathName = map[zapcore.Level]string{
-		zapcore.DebugLevel: "debug.log",
-		zapcore.InfoLevel:  "info.log",
-		zapcore.WarnLevel:  "warn.log",
-		zapcore.ErrorLevel: "error.log",
-	}
-)
-
-var (
-	_enableFunc = map[zapcore.Level]zap.LevelEnablerFunc{
-		zapcore.DebugLevel: zap.LevelEnablerFunc(func(level zapcore.Level) bool {return level >= zapcore.DebugLevel}),
-		zapcore.InfoLevel:  zap.LevelEnablerFunc(func(level zapcore.Level) bool {return level >= zapcore.InfoLevel}),
-		zapcore.WarnLevel:  zap.LevelEnablerFunc(func(level zapcore.Level) bool {return level >= zapcore.WarnLevel}),
-		zapcore.ErrorLevel: zap.LevelEnablerFunc(func(level zapcore.Level) bool {return level >= zapcore.ErrorLevel}),
-	}
-)
+type Option func(*Logger)
 
 type Logger struct {
-	logger *zap.Logger
+	path     string
+	name     string
+	rotation Rotation
+	saveDays int
+	level    Level
+	// 格式控制
+	consoleSeparator string
+	format           string
+	// 格式函数
+	EncodeTime    TimeEncoder
+	EncodeCaller  CallerEncoder
+	EncoderLevel  LevelEncoder
+	EncoderCustom []CustomJsonEncoder
+	// 基本参数
+	writer Writer
+	once   sync.Once
 }
 
-func InitLogger(path, name, split string, days int) *Logger {
-	// split
-	var s time.Duration
-	var f string
-	switch strings.ToLower(split) {
-	case "hour":
-		s = time.Hour
-		f = "-%Y%m%d%H.log"
-	case "day":
-		s = time.Hour * 24
-		f = "-%Y%m%d.log"
-	default:
-		s = time.Hour * 24
-		f = "-%Y%m%d.log"
-	}
-	// 生成core
-	if path[len(path)-1] != '/' {
-		path += "/"
-	}
-	fullName := path + name
-	r, err := rotate.New(
-		strings.Replace(fullName, ".log", "", -1) + f,
-		rotate.WithLinkName(fullName),
-		rotate.WithMaxAge(time.Hour*24*time.Duration(days)),
-		rotate.WithRotationTime(s),
-	)
-	if err != nil {
-		panic(fmt.Sprintf("init logger new roate_log err:%v", err))
-	}
-	core := createCore(r, _enableFunc[zapcore.InfoLevel], false, false, "json")
-	// 生成logger
+func New(name string) *Logger {
 	return &Logger{
-		logger: zap.New(core, zap.AddCaller()),
+		path:             _defaultPath,
+		rotation:         RotationDay,
+		saveDays:         _defaultSaveDays,
+		format:           ConsoleFormat,
+		level:            NoneLevel,
+		EncodeCaller:     defaultCallEncoder,
+		EncodeTime:       defaultTimeEncoder,
+		EncoderLevel:     defaultLevelEncoder,
+		consoleSeparator: " ",
 	}
 }
 
-func InitGroupLogger(path, level ,split string, days int) *Logger {
-	// 判断等级
-	var zapLevel zapcore.Level
-	level = strings.ToLower(level)
-	switch level {
-	case "debug":
-		zapLevel = zapcore.DebugLevel
-	case "info":
-		zapLevel = zapcore.InfoLevel
-	case "warn":
-		zapLevel = zapcore.WarnLevel
-	case "error":
-		zapLevel = zapcore.ErrorLevel
-	default:
-		panic(fmt.Sprintf("init logger,level not support, level:%s", level))
+func NewGroup(level Level) *Logger {
+	return &Logger{
+		path:             _defaultPath,
+		rotation:         RotationDay,
+		saveDays:         _defaultSaveDays,
+		format:           ConsoleFormat,
+		level:            level,
+		EncodeCaller:     defaultCallEncoder,
+		EncodeTime:       defaultTimeEncoder,
+		EncoderLevel:     defaultLevelEncoder,
+		consoleSeparator: " ",
 	}
-	// split
-	var s time.Duration
-	var f string
-	switch strings.ToLower(split) {
-	case "hour":
-		s = time.Hour
-		f = "-%Y%m%d%H.log"
-	case "day":
-		s = time.Hour * 24
-		f = "-%Y%m%d.log"
-	default:
-		s = time.Hour * 24
-		f = "-%Y%m%d.log"
+}
+
+func (l *Logger) fullName() string {
+	if l.path[len(l.path)-1] != '/' {
+		l.path += "/"
 	}
-	// 生成core
-	if path[len(path)-1] != '/' {
-		path += "/"
+	if !strings.Contains(l.name, ".log") {
+		if l.name[len(l.name)-1] == '.' {
+			l.name += "log"
+		} else {
+			l.name += ".log"
+		}
 	}
-	var cores []zapcore.Core
-	for fileLevel, fileName := range _filePathName {
-		if fileLevel >= zapLevel {
-			fullName := path + fileName
+	return l.path + l.name
+}
+
+func (l *Logger) levelName(level Level) string {
+	if l.path[len(l.path)-1] != '/' {
+		l.path += "/"
+	}
+	return l.path + level.StringLower()
+}
+
+func (l *Logger) build() {
+	l.once.Do(func() {
+		if l.level == NoneLevel {
 			r, err := rotate.New(
-				strings.Replace(fullName, ".log", "", -1) + f,
-				rotate.WithLinkName(fullName),
-				rotate.WithMaxAge(time.Hour*24*time.Duration(days)),
-				rotate.WithRotationTime(s),
+				strings.Replace(l.fullName(), ".log", "", -1)+l.rotation.Format(),
+				rotate.WithLinkName(l.fullName()),
+				rotate.WithMaxAge(time.Hour*24*time.Duration(l.saveDays)),
+				rotate.WithRotationTime(l.rotation.Duration()),
 			)
 			if err != nil {
 				panic(fmt.Sprintf("init logger new roate_log err:%v", err))
 			}
-			cores = append(cores, createCore(r, _enableFunc[fileLevel], true, true, "consul"))
-		}
-	}
-	// 生成logger
-	core := zapcore.NewTee(cores...)
-	return &Logger{
-		logger: zap.New(core, zap.AddCaller()),
-	}
-}
-
-func createCore(r *rotate.RotateLogs, enableFunc zap.LevelEnablerFunc, withCaller bool, withLevel bool, format string) zapcore.Core {
-	opts := []zapcore.WriteSyncer{
-		zapcore.AddSync(r),
-	}
-	syncWriter := zapcore.NewMultiWriteSyncer(opts...)
-	// 自定义时间输出格式
-	customTimeEncoder := func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-		enc.AppendString(t.Format("2006-01-02 15:04:05.000"))
-	}
-	// 自定义日志级别显示
-	customLevelEncoder := func(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-		enc.AppendString("[" + level.CapitalString() + "]")
-	}
-	// 自定义文件：行号输出项
-	customCallerEncoder := func(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder) {
-		_, caller.File, caller.Line, _ = runtime.Caller(7)
-		enc.AppendString("[" + caller.TrimmedPath() + "]")
-	}
-	// encoder配置
-	encoderConf := zapcore.EncoderConfig{
-		MessageKey:       "msg",
-		TimeKey:          "time",
-		StacktraceKey:    "stacktrace",
-		LineEnding:       zapcore.DefaultLineEnding,
-		ConsoleSeparator: " ",
-		EncodeTime:       customTimeEncoder,   // 自定义时间格式
-		EncodeDuration:   zapcore.SecondsDurationEncoder,
-		EncodeName:       zapcore.FullNameEncoder,
-	}
-	if withCaller {
-		encoderConf.CallerKey = "caller" // 打印文件名和行数
-		encoderConf.EncodeCaller = customCallerEncoder // 全路径编码器
-	}
-	if withLevel {
-		encoderConf.LevelKey = "level"
-		encoderConf.EncodeLevel = customLevelEncoder // 小写编码器
-	}
-	if format == "json" {
-		return zapcore.NewCore(zapcore.NewJSONEncoder(encoderConf),
-			syncWriter, enableFunc)
-	}
-	return zapcore.NewCore(zapcore.NewConsoleEncoder(encoderConf),
-		syncWriter, enableFunc)
-}
-
-func (l *Logger) trace(ctx context.Context) string {
-	var traceID string
-	span := opentracing.SpanFromContext(ctx)
-	if span == nil {
-		traceID = ""
-	} else {
-		if sc, ok := span.Context().(jaeger.SpanContext); ok {
-			traceID =  sc.TraceID().String()
-		}
-	}
-	return traceID
-}
-
-func (l *Logger) write(ctx context.Context, level zapcore.Level, format string, args ...interface{}) {
-	if ce := l.logger.Check(level, fmt.Sprintf(format, args...)); ce != nil {
-		trace := l.trace(ctx)
-		if trace != "" {
-			ce.Write(
-				zap.String("trace_id", trace),
-			)
+			l.writer = &SingleWriter{r: r, level: l.level}
 		} else {
-			ce.Write()
+			writer := GroupWriter{}
+			for lv := DebugLevel; lv <= ErrorLevel; lv++ {
+				if l.level == lv || l.level.less(lv) {
+					r, err := rotate.New(
+						strings.Replace(l.levelName(lv), ".log", "", -1)+l.rotation.Format(),
+						rotate.WithLinkName(l.levelName(lv)),
+						rotate.WithMaxAge(time.Hour*24*time.Duration(l.saveDays)),
+						rotate.WithRotationTime(l.rotation.Duration()),
+					)
+					if err != nil {
+						panic(fmt.Sprintf("init logger new roate_log err:%v", err))
+					}
+					writer = append(writer, &SingleWriter{r: r, level: lv})
+				}
+			}
+			l.writer = writer
+		}
+	})
+}
+
+func (l *Logger) WithOptions(opts ...Option) {
+	for _, opt := range opts {
+		if opt != nil {
+			opt(l)
 		}
 	}
+}
+
+// Writeln only none level can write
+func (l *Logger) Writeln(a ...interface{}) {
+	l.build()
+	if l.level != NoneLevel {
+		return
+	}
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintln(a...))
+	if buf.Len() > 0 {
+		buf.WriteString("\n")
+	}
+	l.writer.Write(buf.Bytes())
+}
+
+// Write use setting level
+func (l *Logger) Write(ctx context.Context, format string, args ...interface{}) {
+	l.write(ctx, l.level, format, args...)
 }
 
 func (l *Logger) Debug(ctx context.Context, format string, args ...interface{}) {
-	l.write(ctx, zapcore.DebugLevel, format, args...)
+	l.write(ctx, DebugLevel, format, args...)
 }
 
 func (l *Logger) Info(ctx context.Context, format string, args ...interface{}) {
-	l.write(ctx, zapcore.InfoLevel, format, args...)
+	l.write(ctx, InfoLevel, format, args...)
 }
 
 func (l *Logger) Warn(ctx context.Context, format string, args ...interface{}) {
-	l.write(ctx, zapcore.WarnLevel, format, args...)
+	l.write(ctx, WarnLevel, format, args...)
 }
 
 func (l *Logger) Error(ctx context.Context, format string, args ...interface{}) {
-	l.write(ctx, zapcore.ErrorLevel, format, args...)
+	l.write(ctx, ErrorLevel, format, args...)
 }
 
-// 框架默认日志
-var _logger *Logger
-
-func init() {
-	_defaultLogger := InitGroupLogger("./log", "debug", "hour", 7)
-	SetLogger(_defaultLogger)
+func (l *Logger) Panic(ctx context.Context, format string, args ...interface{}) {
+	l.write(ctx, ErrorLevel, format, args...)
+	panic(fmt.Sprintf(format, args...))
 }
 
-func SetLogger(l *Logger) {
-	_logger = l
+func (l *Logger) Fatal(ctx context.Context, format string, args ...interface{}) {
+	l.write(ctx, ErrorLevel, format, args...)
+	os.Exit(-1)
 }
 
-func Debug(ctx context.Context, format string, args ...interface{}) {
-	_logger.Debug(ctx, format, args...)
+func (l *Logger) write(ctx context.Context, level Level, format string, args ...interface{}) {
+	l.build()
+	w := l.writer.check(level)
+
+	var buf bytes.Buffer
+	// 根据格式不同写入
+	switch l.format {
+	case JsonFormat:
+		data := make(map[string]string)
+		if d := l.EncodeTime(time.Now()); d != "" {
+			data["time"] = d
+		}
+		if c := l.EncodeCaller(); c != "" {
+			data["caller"] = c
+		}
+		if lv := level.String(); lv != "" {
+			data["level"] = lv
+		}
+		data["message"] = fmt.Sprintf(format, args...)
+		if traceID := traceEncoder(ctx); traceID != "" {
+			data["trace_id"] = traceID
+		}
+		bs, err := json.Marshal(data)
+		if err != nil {
+			return
+		}
+		for _, ce := range l.EncoderCustom {
+			k, v := ce(ctx)
+			data[k] = v
+		}
+		buf.Write(bs)
+	case ConsoleFormat:
+		if d := l.EncodeTime(time.Now()); d != "" {
+			buf.WriteString(d + l.consoleSeparator)
+		}
+		if c := l.EncodeCaller(); c != "" {
+			buf.WriteString(c + l.consoleSeparator)
+		}
+		if level := l.EncoderLevel(l.level); level != "" {
+			buf.WriteString(level + l.consoleSeparator)
+		}
+		buf.WriteString(fmt.Sprintf(format, args...) + l.consoleSeparator)
+		if traceID := traceEncoder(ctx); traceID != "" {
+			buf.WriteString("(" + traceID + ")")
+		}
+	}
+	if buf.Len() > 0 {
+		buf.WriteString("\n")
+	}
+	w.Write(buf.Bytes())
 }
 
-func Info(ctx context.Context, format string, args ...interface{}) {
-	_logger.Info(ctx, format, args...)
+func SetPath(path string) Option {
+	return func(logger *Logger) {
+		logger.path = path
+	}
 }
 
-func Warn(ctx context.Context, format string, args ...interface{}) {
-	_logger.Warn(ctx, format, args...)
+func SetRotation(r Rotation) Option {
+	return func(logger *Logger) {
+		logger.rotation = r
+	}
 }
 
-func Error(ctx context.Context, format string, args ...interface{}) {
-	_logger.Error(ctx, format, args...)
+func SetSaveDays(days int) Option {
+	return func(logger *Logger) {
+		logger.saveDays = days
+	}
+}
+
+func SetFormat(format string) Option {
+	return func(logger *Logger) {
+		if format == JsonFormat || format == ConsoleFormat {
+			logger.format = format
+		}
+	}
+}
+
+func SetPathDeep(deep int) Option {
+	return func(logger *Logger) {
+		PathDeep = deep
+	}
+}
+
+func SetConsoleSeparator(separator string) Option {
+	return func(logger *Logger) {
+		logger.consoleSeparator = separator
+	}
+}
+
+func SetTimeEncoder(encoder TimeEncoder) Option {
+	return func(logger *Logger) {
+		logger.EncodeTime = encoder
+	}
+}
+
+func SetCallerEncoder(encoder CallerEncoder) Option {
+	return func(logger *Logger) {
+		logger.EncodeCaller = encoder
+	}
+}
+
+func SetLevelEncoder(encoder LevelEncoder) Option {
+	return func(logger *Logger) {
+		logger.EncoderLevel = encoder
+	}
+}
+
+func SetCustomJsonEncoder(encoders ...CustomJsonEncoder) Option {
+	return func(logger *Logger) {
+		if logger.format == JsonFormat {
+			logger.EncoderCustom = append(logger.EncoderCustom, encoders...)
+		}
+	}
 }
