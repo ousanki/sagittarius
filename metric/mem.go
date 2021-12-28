@@ -165,12 +165,12 @@ func size2Human(size uint64) string {
 }
 
 var _m *MemMetric
-var _logger *log.Logger
+var stackLogger *log.Logger
 
 func init() {
 	_m = new(MemMetric)
-	_logger = log.New("stack")
-	_logger.WithOptions(
+	stackLogger = log.New("stack")
+	stackLogger.WithOptions(
 		log.SetRotation(log.RotationDay),
 		log.SetPath("./log"),
 		log.SetFormat(log.ConsoleFormat),
@@ -190,7 +190,7 @@ func Metric() {
 			loadStats()
 			// 生成报告
 			report := _m.GetReport()
-			_logger.Writeln(report.Format())
+			stackLogger.Writeln(report.Format())
 			// 后处理
 			_m.before = _m.current
 		}
