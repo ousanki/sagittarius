@@ -12,18 +12,10 @@ import (
 )
 
 var genLogger *log.Logger
-var accessLogger *log.Logger
 
 func init() {
 	genLogger = log.New("gen")
 	genLogger.WithOptions(
-		log.SetRotation(log.RotationDay),
-		log.SetPath("./log"),
-		log.SetFormat(log.ConsoleFormat),
-	)
-
-	accessLogger = log.New("access")
-	accessLogger.WithOptions(
 		log.SetRotation(log.RotationDay),
 		log.SetPath("./log"),
 		log.SetFormat(log.ConsoleFormat),
