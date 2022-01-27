@@ -35,6 +35,7 @@ type Logger struct {
 
 func New(name string) *Logger {
 	return &Logger{
+		name:             name,
 		path:             _defaultPath,
 		rotation:         RotationDay,
 		saveDays:         _defaultSaveDays,
